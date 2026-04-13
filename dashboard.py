@@ -58,47 +58,46 @@ def fetch_ticker(ticker, start, end):
     except:
         return None
 
-@st.cache_data(show_spinner=False)
-def compute_indicators(ticker_df_dict, bench_df_json):
-    bench_df = pd.read_json(bench_df_json)
-    bench_df["Date"] = pd.to_datetime(bench_df["Date"])
+def compute_indicators(portfolio_data, bench_df):
     results = {}
-    for ticker, df_json in ticker_df_dict.items():
-        df = pd.read_json(df_json)
-        df["Date"] = pd.to_datetime(df["Date"])
-        merged = pd.merge(
-            bench_df[["Date", "Close", "% Change"]],
-            df[["Date", "Close", "% Change"]],
-            on="Date", suffixes=("_bench", "_stock")
-        ).dropna().reset_index(drop=True)
+    for ticker, df in portfolio_data.items():
+        try:
+            merged = pd.merge(
+                bench_df[["Date", "Close", "% Change"]],
+                df[["Date", "Close", "% Change"]],
+                on="Date", suffixes=("_bench", "_stock")
+            ).dropna().reset_index(drop=True)
 
-        if len(merged) < 30:
+            if len(merged) < 30:
+                continue
+
+            merged["Cum_bench"] = (1 + merged["% Change_bench"]).cumprod()
+            merged["Cum_stock"] = (1 + merged["% Change_stock"]).cumprod()
+            merged["RS_Line"]   = merged["Cum_stock"] / merged["Cum_bench"]
+            merged["RS_Norm"]   = (merged["RS_Line"] / merged["RS_Line"].iloc[0]) * 100
+
+            merged["RS_Rolling"] = (
+                merged["% Change_stock"].rolling(30).apply(lambda x: (1+x).prod(), raw=True) /
+                merged["% Change_bench"].rolling(30).apply(lambda x: (1+x).prod(), raw=True)
+            )
+
+            cov  = merged["% Change_stock"].rolling(30).cov(merged["% Change_bench"])
+            var  = merged["% Change_bench"].rolling(30).var()
+            merged["Beta"] = cov / var
+            merged["Corr"] = merged["% Change_stock"].rolling(30).corr(merged["% Change_bench"])
+
+            delta    = merged["Close_stock"].diff()
+            gain     = delta.clip(lower=0)
+            loss     = -delta.clip(upper=0)
+            avg_gain = gain.rolling(14).mean()
+            avg_loss = loss.rolling(14).mean()
+            rs       = avg_gain / avg_loss
+            merged["RSI"] = 100 - (100 / (1 + rs))
+
+            results[ticker] = merged
+        except Exception as e:
+            st.warning(f"Skipping {ticker}: {e}")
             continue
-
-        merged["Cum_bench"] = (1 + merged["% Change_bench"]).cumprod()
-        merged["Cum_stock"] = (1 + merged["% Change_stock"]).cumprod()
-        merged["RS_Line"]   = merged["Cum_stock"] / merged["Cum_bench"]
-        merged["RS_Norm"]   = (merged["RS_Line"] / merged["RS_Line"].iloc[0]) * 100
-
-        merged["RS_Rolling"] = (
-            merged["% Change_stock"].rolling(30).apply(lambda x: (1+x).prod(), raw=True) /
-            merged["% Change_bench"].rolling(30).apply(lambda x: (1+x).prod(), raw=True)
-        )
-
-        cov  = merged["% Change_stock"].rolling(30).cov(merged["% Change_bench"])
-        var  = merged["% Change_bench"].rolling(30).var()
-        merged["Beta"] = cov / var
-        merged["Corr"] = merged["% Change_stock"].rolling(30).corr(merged["% Change_bench"])
-
-        delta    = merged["Close_stock"].diff()
-        gain     = delta.clip(lower=0)
-        loss     = -delta.clip(upper=0)
-        avg_gain = gain.rolling(14).mean()
-        avg_loss = loss.rolling(14).mean()
-        rs       = avg_gain / avg_loss
-        merged["RSI"] = 100 - (100 / (1 + rs))
-
-        results[ticker] = merged
     return results
 
 # ══════════════════════════════════════════
@@ -107,15 +106,17 @@ def compute_indicators(ticker_df_dict, bench_df_json):
 with st.spinner("📡 Fetching market data... (this may take a minute on first load)"):
     bench = fetch_ticker(BENCHMARK, START_DATE, END_DATE)
 
+    if bench is None or bench.empty:
+        st.error("❌ Failed to fetch benchmark (SPY). Please refresh the page.")
+        st.stop()
+
     portfolio_data = {}
     for ticker in TICKERS:
         df = fetch_ticker(ticker, START_DATE, END_DATE)
         if df is not None and len(df) > 30:
             portfolio_data[ticker] = df
 
-    # Serialize for cache
-    ticker_df_dict = {t: df.to_json() for t, df in portfolio_data.items()}
-    indicators = compute_indicators(ticker_df_dict, bench.to_json())
+    indicators = compute_indicators(portfolio_data, bench)
 
 st.success(f"✅ Loaded {len(indicators)} tickers | 📅 {START_DATE} → {END_DATE}")
 
