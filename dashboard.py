@@ -45,18 +45,25 @@ END_DATE = get_last_trading_day()
 # ══════════════════════════════════════════
 @st.cache_data(show_spinner=False)
 def fetch_ticker(ticker, start, end):
-    try:
-        raw = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
-        if raw.empty:
+    import time
+    for attempt in range(3):
+        try:
+            time.sleep(0.5)
+            raw = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
+            if raw.empty:
+                return None
+            raw.columns = [col[0] for col in raw.columns]
+            df = raw[["Close"]].reset_index()
+            df.columns = ["Date", "Close"]
+            df["% Change"] = df["Close"].pct_change()
+            df["Date"] = pd.to_datetime(df["Date"])
+            return df.dropna().reset_index(drop=True)
+        except Exception as e:
+            if "Too Many Requests" in str(e) or "Rate" in str(e):
+                time.sleep(5 * (attempt + 1))
+                continue
             return None
-        raw.columns = [col[0] for col in raw.columns]
-        df = raw[["Close"]].reset_index()
-        df.columns = ["Date", "Close"]
-        df["% Change"] = df["Close"].pct_change()
-        df["Date"] = pd.to_datetime(df["Date"])
-        return df.dropna().reset_index(drop=True)
-    except:
-        return None
+    return None
 
 def compute_indicators(portfolio_data, bench_df):
     results = {}
