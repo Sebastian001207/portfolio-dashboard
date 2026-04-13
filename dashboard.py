@@ -43,12 +43,12 @@ END_DATE = get_last_trading_day()
 # ══════════════════════════════════════════
 #  DATA FETCHING (cached)
 # ══════════════════════════════════════════
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=3600)
 def fetch_ticker(ticker, start, end):
     import time
-    for attempt in range(3):
+    for attempt in range(5):
         try:
-            time.sleep(0.5)
+            time.sleep(1 + attempt)
             raw = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
             if raw.empty:
                 return None
@@ -60,7 +60,7 @@ def fetch_ticker(ticker, start, end):
             return df.dropna().reset_index(drop=True)
         except Exception as e:
             if "Too Many Requests" in str(e) or "Rate" in str(e):
-                time.sleep(5 * (attempt + 1))
+                time.sleep(10 * (attempt + 1))
                 continue
             return None
     return None
