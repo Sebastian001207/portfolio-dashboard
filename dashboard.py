@@ -1,12 +1,21 @@
+import streamlit as st
 import yfinance as yf
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-import matplotlib.colors as mcolors
 import numpy as np
 from datetime import date, timedelta
-from IPython.display import display
-import ipywidgets as widgets
+
+# ══════════════════════════════════════════
+#  PAGE CONFIG
+# ══════════════════════════════════════════
+st.set_page_config(
+    page_title="Portfolio Dashboard",
+    page_icon="📊",
+    layout="wide"
+)
+
+st.title("📊 Portfolio vs SPY Dashboard")
 
 # ══════════════════════════════════════════
 #  CONFIG
@@ -22,8 +31,6 @@ TICKERS = [
     "COHR", "LITE", "MU",   "DFEN", "AVGO",  "EQIX",  "ETH-USD", "CRDO",
     "SOFI", "MDB",  "PYPL", "COIN", "INTC",  "IREN",  "ALAB",
 ]
-# Note: BTCUSD→BTC-USD, ETHUSD→ETH-USD, RHM.DE skipped (limited yfinance support)
-# ══════════════════════════════════════════
 
 def get_last_trading_day():
     today = date.today()
@@ -32,11 +39,11 @@ def get_last_trading_day():
     return (today - timedelta(days=days_back)).strftime("%Y-%m-%d")
 
 END_DATE = get_last_trading_day()
-print(f"📅 Period: {START_DATE} → {END_DATE}")
-print(f"📊 Benchmark: {BENCHMARK}")
-print(f"🔍 Fetching {len(TICKERS)+1} tickers...\n")
 
-# ── Fetch all tickers ─────────────────────────────────────────────────
+# ══════════════════════════════════════════
+#  DATA FETCHING (cached)
+# ══════════════════════════════════════════
+@st.cache_data(show_spinner=False)
 def fetch_ticker(ticker, start, end):
     try:
         raw = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
@@ -51,79 +58,70 @@ def fetch_ticker(ticker, start, end):
     except:
         return None
 
-# Fetch benchmark
-bench = fetch_ticker(BENCHMARK, START_DATE, END_DATE)
-print(f"✅ {BENCHMARK} (benchmark): {len(bench)} rows")
+@st.cache_data(show_spinner=False)
+def compute_indicators(ticker_df_dict, bench_df_json):
+    bench_df = pd.read_json(bench_df_json)
+    bench_df["Date"] = pd.to_datetime(bench_df["Date"])
+    results = {}
+    for ticker, df_json in ticker_df_dict.items():
+        df = pd.read_json(df_json)
+        df["Date"] = pd.to_datetime(df["Date"])
+        merged = pd.merge(
+            bench_df[["Date", "Close", "% Change"]],
+            df[["Date", "Close", "% Change"]],
+            on="Date", suffixes=("_bench", "_stock")
+        ).dropna().reset_index(drop=True)
 
-# Fetch all portfolio tickers
-portfolio_data = {}
-failed = []
-for ticker in TICKERS:
-    df = fetch_ticker(ticker, START_DATE, END_DATE)
-    if df is not None and len(df) > 30:
-        portfolio_data[ticker] = df
-        print(f"  ✅ {ticker}: {len(df)} rows")
-    else:
-        failed.append(ticker)
-        print(f"  ❌ {ticker}: failed or insufficient data")
+        if len(merged) < 30:
+            continue
 
-print(f"\n✅ Loaded: {len(portfolio_data)} | ❌ Failed: {len(failed)}")
-if failed:
-    print(f"   Failed tickers: {failed}")
+        merged["Cum_bench"] = (1 + merged["% Change_bench"]).cumprod()
+        merged["Cum_stock"] = (1 + merged["% Change_stock"]).cumprod()
+        merged["RS_Line"]   = merged["Cum_stock"] / merged["Cum_bench"]
+        merged["RS_Norm"]   = (merged["RS_Line"] / merged["RS_Line"].iloc[0]) * 100
 
-# ── Compute indicators for all tickers ───────────────────────────────
-def compute_indicators(df, bench_df):
-    merged = pd.merge(
-        bench_df[["Date", "Close", "% Change"]],
-        df[["Date", "Close", "% Change"]],
-        on="Date", suffixes=("_bench", "_stock")
-    ).dropna().reset_index(drop=True)
-
-    if len(merged) < 30:
-        return None
-
-    # Returns
-    merged["Cum_bench"] = (1 + merged["% Change_bench"]).cumprod()
-    merged["Cum_stock"] = (1 + merged["% Change_stock"]).cumprod()
-    merged["RS_Line"]   = merged["Cum_stock"] / merged["Cum_bench"]
-    merged["RS_Norm"]   = (merged["RS_Line"] / merged["RS_Line"].iloc[0]) * 100
-
-    # Rolling RS 60d
-    if len(merged) >= 30:
         merged["RS_Rolling"] = (
             merged["% Change_stock"].rolling(30).apply(lambda x: (1+x).prod(), raw=True) /
             merged["% Change_bench"].rolling(30).apply(lambda x: (1+x).prod(), raw=True)
         )
-    else:
-        merged["RS_Rolling"] = np.nan
 
-    # Beta & Correlation
-    cov  = merged["% Change_stock"].rolling(30).cov(merged["% Change_bench"])
-    var  = merged["% Change_bench"].rolling(30).var()
-    merged["Beta"] = cov / var
-    merged["Corr"] = merged["% Change_stock"].rolling(30).corr(merged["% Change_bench"])
+        cov  = merged["% Change_stock"].rolling(30).cov(merged["% Change_bench"])
+        var  = merged["% Change_bench"].rolling(30).var()
+        merged["Beta"] = cov / var
+        merged["Corr"] = merged["% Change_stock"].rolling(30).corr(merged["% Change_bench"])
 
-    # RSI (14-period)
-    delta    = merged["Close_stock"].diff()
-    gain     = delta.clip(lower=0)
-    loss     = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs       = avg_gain / avg_loss
-    merged["RSI"] = 100 - (100 / (1 + rs))
+        delta    = merged["Close_stock"].diff()
+        gain     = delta.clip(lower=0)
+        loss     = -delta.clip(upper=0)
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+        rs       = avg_gain / avg_loss
+        merged["RSI"] = 100 - (100 / (1 + rs))
 
-    return merged
+        results[ticker] = merged
+    return results
 
-print("\n⚙️  Computing indicators...")
-indicators = {}
-for ticker, df in portfolio_data.items():
-    result = compute_indicators(df, bench)
-    if result is not None:
-        indicators[ticker] = result
+# ══════════════════════════════════════════
+#  LOAD DATA
+# ══════════════════════════════════════════
+with st.spinner("📡 Fetching market data... (this may take a minute on first load)"):
+    bench = fetch_ticker(BENCHMARK, START_DATE, END_DATE)
 
-print(f"✅ Indicators computed for {len(indicators)} tickers")
+    portfolio_data = {}
+    for ticker in TICKERS:
+        df = fetch_ticker(ticker, START_DATE, END_DATE)
+        if df is not None and len(df) > 30:
+            portfolio_data[ticker] = df
 
-# ── Build Summary Table ───────────────────────────────────────────────
+    # Serialize for cache
+    ticker_df_dict = {t: df.to_json() for t, df in portfolio_data.items()}
+    indicators = compute_indicators(ticker_df_dict, bench.to_json())
+
+st.success(f"✅ Loaded {len(indicators)} tickers | 📅 {START_DATE} → {END_DATE}")
+
+# ══════════════════════════════════════════
+#  BUILD SUMMARY TABLE
+# ══════════════════════════════════════════
 def period_return(df, col, days):
     if len(df) < days:
         return np.nan
@@ -145,7 +143,6 @@ for ticker, df in indicators.items():
         "RS Roll 60d": round(df["RS_Rolling"].iloc[-1],  2) if not df["RS_Rolling"].isna().all() else np.nan,
     })
 
-# Benchmark row
 rows.insert(0, {
     "Ticker":      f"{BENCHMARK} (bench)",
     "Last Close":  round(bench["Close"].iloc[-1], 2),
@@ -162,190 +159,134 @@ rows.insert(0, {
 
 summary = pd.DataFrame(rows)
 
-# ══════════════════════════════════════════════════════════════════════
-#  INTERACTIVE DASHBOARD
-# ══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════
+#  TAB LAYOUT
+# ══════════════════════════════════════════
+tab1, tab2 = st.tabs(["📋 Summary Heatmap", "📈 Deep Dive"])
 
-# ── Widget 1: Summary Heatmap Table ──────────────────────────────────
-def plot_heatmap(sort_col="YTD %"):
-    df = summary[summary["Ticker"] != f"{BENCHMARK} (bench)"].copy()
-    df = df.sort_values(sort_col, ascending=False).reset_index(drop=True)
+# ── TAB 1: Heatmap Table ─────────────────
+with tab1:
+    st.subheader("Portfolio Heatmap Table")
 
-    fig, ax = plt.subplots(figsize=(16, max(8, len(df) * 0.35)))
-    ax.axis("off")
+    sort_col = st.selectbox(
+        "Sort by:",
+        ["YTD %", "1M %", "3M %", "6M %", "RSI", "Beta", "RS Norm", "RS Roll 60d"],
+        index=0
+    )
 
-    cols    = ["Ticker", "Last Close", "1M %", "3M %", "6M %", "YTD %", "RSI", "Beta", "Corr", "RS Norm", "RS Roll 60d"]
-    cell_text = df[cols].values.tolist()
-    col_labels = cols
+    df_display = summary[summary["Ticker"] != f"{BENCHMARK} (bench)"].copy()
+    df_display = df_display.sort_values(sort_col, ascending=False).reset_index(drop=True)
 
-    table = ax.table(cellText=cell_text, colLabels=col_labels,
-                     loc="center", cellLoc="center")
-    table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    table.scale(1, 1.4)
+    def color_pct(val):
+        if pd.isna(val):
+            return ""
+        intensity = min(abs(val) / 30, 1)
+        if val > 0:
+            g = int(200 + intensity * 55)
+            return f"background-color: rgb(200, {g}, 200); color: black"
+        else:
+            r = int(200 + intensity * 55)
+            return f"background-color: rgb({r}, 200, 200); color: black"
 
-    # Color cells
-    pct_cols  = [cols.index(c) for c in ["1M %", "3M %", "6M %", "YTD %"]]
-    rs_cols   = [cols.index(c) for c in ["RS Norm", "RS Roll 60d"]]
-    rsi_col   = cols.index("RSI")
+    def color_rs(val):
+        if pd.isna(val):
+            return ""
+        return "background-color: #d4edda" if val > 100 else "background-color: #f8d7da"
 
-    for i, row in df.iterrows():
-        for j, col in enumerate(cols):
-            cell = table[i+1, j]
-            val  = df.iloc[i][col]
+    def color_rsi(val):
+        if pd.isna(val):
+            return ""
+        if val > 70:   return "background-color: #f8d7da"
+        elif val < 30: return "background-color: #d4edda"
+        else:          return "background-color: #fff3cd"
 
-            if j in pct_cols and not pd.isna(val):
-                intensity = min(abs(val) / 30, 1)
-                color = (1 - intensity * 0.6, 1, 1 - intensity * 0.6) if val > 0 else (1, 1 - intensity * 0.6, 1 - intensity * 0.6)
-                cell.set_facecolor(color)
-            elif j in rs_cols and not pd.isna(val):
-                color = "#d4edda" if val > 100 else "#f8d7da"
-                cell.set_facecolor(color)
-            elif j == rsi_col and not pd.isna(val):
-                if val > 70:   cell.set_facecolor("#f8d7da")
-                elif val < 30: cell.set_facecolor("#d4edda")
-                else:          cell.set_facecolor("#fff3cd")
+    styled = df_display.style \
+        .applymap(color_pct,  subset=["1M %", "3M %", "6M %", "YTD %"]) \
+        .applymap(color_rs,   subset=["RS Norm", "RS Roll 60d"]) \
+        .applymap(color_rsi,  subset=["RSI"])
 
-    # Header style
-    for j in range(len(cols)):
-        table[0, j].set_facecolor("#2c3e50")
-        table[0, j].set_text_props(color="white", fontweight="bold")
+    st.dataframe(styled, use_container_width=True, height=600)
 
-    plt.title(f"Portfolio vs {BENCHMARK} — Sorted by {sort_col} | {START_DATE} → {END_DATE}",
-              fontsize=13, fontweight="bold", pad=20)
-    plt.tight_layout()
-    plt.show()
+# ── TAB 2: Deep Dive ─────────────────────
+with tab2:
+    st.subheader("Individual Stock Deep Dive")
 
-# ── Widget 2: Individual Stock Deep Dive ─────────────────────────────
-def plot_stock(ticker):
-    if ticker not in indicators:
-        print(f"No data for {ticker}")
-        return
+    ticker = st.selectbox("Select ticker:", sorted(indicators.keys()))
 
-    df  = indicators[ticker]
-    fig = plt.figure(figsize=(16, 26))
-    fig.suptitle(f"{ticker} vs {BENCHMARK} — Full Indicator Dashboard",
-                 fontsize=14, fontweight="bold")
-    gs  = gridspec.GridSpec(7, 1, hspace=0.55)
+    if ticker and ticker in indicators:
+        df = indicators[ticker]
 
-    # ── Row 0: Price ──────────────────────────────────────────────────
-    ax0 = fig.add_subplot(gs[0])
-    ax0.plot(df["Date"], df["Close_stock"], color="royalblue", linewidth=1.8, label=ticker)
-    ax0_ = ax0.twinx()
-    ax0_.plot(df["Date"], df["Close_bench"], color="gray", linewidth=1, linestyle="--", label=BENCHMARK)
-    ax0.set_title(f"Price — {ticker} (blue) vs {BENCHMARK} (gray dashed)")
-    ax0.set_ylabel(f"{ticker} Price")
-    ax0_.set_ylabel(f"{BENCHMARK} Price", color="gray")
-    ax0.grid(True, alpha=0.3)
+        fig = plt.figure(figsize=(14, 24))
+        fig.suptitle(f"{ticker} vs {BENCHMARK} — Full Indicator Dashboard",
+                     fontsize=13, fontweight="bold")
+        gs = gridspec.GridSpec(6, 1, hspace=0.55)
 
-    # ── Row 1: Cumulative Return ──────────────────────────────────────
-    ax1 = fig.add_subplot(gs[1])
-    ax1.plot(df["Date"], (df["Cum_stock"] - 1) * 100, color="royalblue", linewidth=1.8, label=ticker)
-    ax1.plot(df["Date"], (df["Cum_bench"] - 1) * 100, color="gray",      linewidth=1.5, linestyle="--", label=BENCHMARK)
-    ax1.axhline(0, color="gray", linestyle="--", linewidth=0.8)
-    ax1.set_title("① Cumulative Return (%) — Path dependent, reference only")
-    ax1.set_ylabel("Return (%)")
-    ax1.legend(fontsize=8)
-    ax1.grid(True, alpha=0.3)
+        # Price
+        ax0 = fig.add_subplot(gs[0])
+        ax0.plot(df["Date"], df["Close_stock"], color="royalblue", linewidth=1.8, label=ticker)
+        ax0_ = ax0.twinx()
+        ax0_.plot(df["Date"], df["Close_bench"], color="gray", linewidth=1, linestyle="--", label=BENCHMARK)
+        ax0.set_title(f"Price — {ticker} (blue) vs {BENCHMARK} (gray dashed)")
+        ax0.set_ylabel(f"{ticker} Price")
+        ax0_.set_ylabel(f"{BENCHMARK} Price", color="gray")
+        ax0.grid(True, alpha=0.3)
 
-    # ── Row 2: RS Normalized to 100 ──────────────────────────────────
-    ax2 = fig.add_subplot(gs[2])
-    ax2.plot(df["Date"], df["RS_Norm"], color="teal", linewidth=1.5)
-    ax2.axhline(100, color="gray", linestyle="--", linewidth=1, label="Starting point (100)")
-    ax2.fill_between(df["Date"], df["RS_Norm"], 100,
-                     where=(df["RS_Norm"] > 100), alpha=0.15, color="green", label=f"{ticker} Outperforming")
-    ax2.fill_between(df["Date"], df["RS_Norm"], 100,
-                     where=(df["RS_Norm"] < 100), alpha=0.15, color="red",   label=f"{BENCHMARK} Outperforming")
-    ax2.set_title("② RS Line Normalized to 100 — Easier to compare across periods")
-    ax2.set_ylabel("RS Index (base=100)")
-    ax2.legend(fontsize=8)
-    ax2.grid(True, alpha=0.3)
+        # Cumulative Return
+        ax1 = fig.add_subplot(gs[1])
+        ax1.plot(df["Date"], (df["Cum_stock"] - 1) * 100, color="royalblue", linewidth=1.8, label=ticker)
+        ax1.plot(df["Date"], (df["Cum_bench"] - 1) * 100, color="gray", linewidth=1.5, linestyle="--", label=BENCHMARK)
+        ax1.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+        ax1.set_title("① Cumulative Return (%)")
+        ax1.set_ylabel("Return (%)")
+        ax1.legend(fontsize=8)
+        ax1.grid(True, alpha=0.3)
 
-    # ── Row 3: Rolling 30-Day RS ──────────────────────────────────────
-    ax3 = fig.add_subplot(gs[3])
-    ax3.plot(df["Date"], df["RS_Rolling"], color="purple", linewidth=1.5)
-    ax3.axhline(1, color="gray", linestyle="--", linewidth=1, label="Equal 30-day return")
-    ax3.fill_between(df["Date"], df["RS_Rolling"], 1,
-                     where=(df["RS_Rolling"] > 1), alpha=0.15, color="green", label=f"{ticker} stronger (30d)")
-    ax3.fill_between(df["Date"], df["RS_Rolling"], 1,
-                     where=(df["RS_Rolling"] < 1), alpha=0.15, color="red",   label=f"{BENCHMARK} stronger (30d)")
-    ax3.set_title("③ Rolling 30-Day RS — Start date neutral, shows recent momentum")
-    ax3.set_ylabel("Rolling RS Ratio")
-    ax3.legend(fontsize=8)
-    ax3.grid(True, alpha=0.3)
+        # RS Normalized
+        ax2 = fig.add_subplot(gs[2])
+        ax2.plot(df["Date"], df["RS_Norm"], color="teal", linewidth=1.5)
+        ax2.axhline(100, color="gray", linestyle="--", linewidth=1)
+        ax2.fill_between(df["Date"], df["RS_Norm"], 100, where=(df["RS_Norm"] > 100), alpha=0.15, color="green")
+        ax2.fill_between(df["Date"], df["RS_Norm"], 100, where=(df["RS_Norm"] < 100), alpha=0.15, color="red")
+        ax2.set_title("② RS Line Normalized to 100")
+        ax2.set_ylabel("RS Index (base=100)")
+        ax2.grid(True, alpha=0.3)
 
-    # ── Row 4: RSI ────────────────────────────────────────────────────
-    ax4 = fig.add_subplot(gs[4])
-    ax4.plot(df["Date"], df["RSI"], color="royalblue", linewidth=1.5)
-    ax4.axhline(70, color="red",   linestyle="--", linewidth=1, label="Overbought (70)")
-    ax4.axhline(50, color="gray",  linestyle=":",  linewidth=1, label="Midline (50)")
-    ax4.axhline(30, color="green", linestyle="--", linewidth=1, label="Oversold (30)")
-    ax4.fill_between(df["Date"], df["RSI"], 70, where=(df["RSI"] >= 70), alpha=0.2, color="red")
-    ax4.fill_between(df["Date"], df["RSI"], 30, where=(df["RSI"] <= 30), alpha=0.2, color="green")
-    ax4.set_title("④ RSI (14)")
-    ax4.set_ylabel("RSI")
-    ax4.set_ylim(0, 100)
-    ax4.legend(fontsize=8)
-    ax4.grid(True, alpha=0.3)
+        # RSI
+        ax3 = fig.add_subplot(gs[3])
+        ax3.plot(df["Date"], df["RSI"], color="royalblue", linewidth=1.5)
+        ax3.axhline(70, color="red",   linestyle="--", linewidth=1, label="Overbought (70)")
+        ax3.axhline(50, color="gray",  linestyle=":",  linewidth=1)
+        ax3.axhline(30, color="green", linestyle="--", linewidth=1, label="Oversold (30)")
+        ax3.fill_between(df["Date"], df["RSI"], 70, where=(df["RSI"] >= 70), alpha=0.2, color="red")
+        ax3.fill_between(df["Date"], df["RSI"], 30, where=(df["RSI"] <= 30), alpha=0.2, color="green")
+        ax3.set_title("③ RSI (14)")
+        ax3.set_ylabel("RSI")
+        ax3.set_ylim(0, 100)
+        ax3.legend(fontsize=8)
+        ax3.grid(True, alpha=0.3)
 
-    # ── Row 5: Rolling Beta ───────────────────────────────────────────
-    ax5 = fig.add_subplot(gs[5])
-    ax5.plot(df["Date"], df["Beta"], color="darkorange", linewidth=1.5)
-    ax5.axhline(1,   color="gray", linestyle="--", linewidth=1,   label="Beta = 1")
-    ax5.axhline(1.5, color="red",  linestyle=":",  linewidth=0.8, label="Beta = 1.5")
-    ax5.fill_between(df["Date"], df["Beta"], 1,
-                     where=(df["Beta"] > 1), alpha=0.15, color="red",   label=f"{ticker} more volatile")
-    ax5.fill_between(df["Date"], df["Beta"], 1,
-                     where=(df["Beta"] < 1), alpha=0.15, color="green", label=f"{ticker} less volatile")
-    ax5.set_title("⑤ Rolling 30-Day Beta — Not start date sensitive ✅")
-    ax5.set_ylabel("Beta")
-    ax5.legend(fontsize=8)
-    ax5.grid(True, alpha=0.3)
+        # Beta
+        ax4 = fig.add_subplot(gs[4])
+        ax4.plot(df["Date"], df["Beta"], color="darkorange", linewidth=1.5)
+        ax4.axhline(1, color="gray", linestyle="--", linewidth=1, label="Beta = 1")
+        ax4.fill_between(df["Date"], df["Beta"], 1, where=(df["Beta"] > 1), alpha=0.15, color="red")
+        ax4.fill_between(df["Date"], df["Beta"], 1, where=(df["Beta"] < 1), alpha=0.15, color="green")
+        ax4.set_title("④ Rolling 30-Day Beta")
+        ax4.set_ylabel("Beta")
+        ax4.legend(fontsize=8)
+        ax4.grid(True, alpha=0.3)
 
-    # ── Row 6: Rolling Correlation ────────────────────────────────────
-    ax6 = fig.add_subplot(gs[6])
-    ax6.plot(df["Date"], df["Corr"], color="steelblue", linewidth=1.5)
-    ax6.axhline(1.0, color="green", linestyle="--", linewidth=0.8, label="Perfect correlation (1.0)")
-    ax6.axhline(0.8, color="gray",  linestyle=":",  linewidth=0.8, label="0.8 threshold")
-    ax6.fill_between(df["Date"], df["Corr"], 0.8,
-                     where=(df["Corr"] < 0.8), alpha=0.2, color="orange", label="Diverging from SPY")
-    ax6.set_title("⑥ Rolling 30-Day Correlation — Not start date sensitive ✅")
-    ax6.set_ylabel("Correlation")
-    ax6.set_ylim(0, 1.1)
-    ax6.legend(fontsize=8)
-    ax6.grid(True, alpha=0.3)
+        # Correlation
+        ax5 = fig.add_subplot(gs[5])
+        ax5.plot(df["Date"], df["Corr"], color="steelblue", linewidth=1.5)
+        ax5.axhline(0.8, color="gray", linestyle=":", linewidth=0.8, label="0.8 threshold")
+        ax5.fill_between(df["Date"], df["Corr"], 0.8, where=(df["Corr"] < 0.8), alpha=0.2, color="orange")
+        ax5.set_title("⑤ Rolling 30-Day Correlation")
+        ax5.set_ylabel("Correlation")
+        ax5.set_ylim(0, 1.1)
+        ax5.legend(fontsize=8)
+        ax5.grid(True, alpha=0.3)
 
-    plt.tight_layout()
-    plt.show()
-
-# ── Launch Interactive Widgets ────────────────────────────────────────
-sort_dropdown = widgets.Dropdown(
-    options=["YTD %", "1M %", "3M %", "6M %", "RSI", "Beta", "RS Norm", "RS Roll 60d"],
-    value="YTD %",
-    description="Sort by:",
-    style={"description_width": "initial"}
-)
-
-ticker_dropdown = widgets.Dropdown(
-    options=sorted(indicators.keys()),
-    description="Deep dive:",
-    style={"description_width": "initial"}
-)
-
-heatmap_btn = widgets.Button(description="🔄 Refresh Table",  button_style="primary")
-deepdive_btn = widgets.Button(description="📈 Show Deep Dive", button_style="success")
-
-def on_heatmap(b):
-    plot_heatmap(sort_dropdown.value)
-
-def on_deepdive(b):
-    plot_stock(ticker_dropdown.value)
-
-heatmap_btn.on_click(on_heatmap)
-deepdive_btn.on_click(on_deepdive)
-
-display(widgets.HBox([sort_dropdown, heatmap_btn]))
-display(widgets.HBox([ticker_dropdown, deepdive_btn]))
-
-# Auto-render on load
-plot_heatmap("YTD %")
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close()
