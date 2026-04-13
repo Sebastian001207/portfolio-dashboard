@@ -201,6 +201,11 @@ with tab1:
             return ""
         return "background-color: #d4edda" if val > 100 else "background-color: #f8d7da"
 
+    def color_rs_roll(val):
+        if pd.isna(val):
+            return ""
+        return "background-color: #d4edda" if val > 1 else "background-color: #f8d7da"
+
     def color_rsi(val):
         if pd.isna(val):
             return ""
@@ -209,9 +214,10 @@ with tab1:
         else:          return "background-color: #fff3cd"
 
     styled = df_display.style \
-        .map(color_pct,  subset=["1M %", "3M %", "6M %", "YTD %"]) \
-        .map(color_rs,   subset=["RS Norm", "RS Roll 60d"]) \
-        .map(color_rsi,  subset=["RSI"])
+        .map(color_pct,     subset=["1M %", "3M %", "6M %", "YTD %"]) \
+        .map(color_rs,      subset=["RS Norm"]) \
+        .map(color_rs_roll, subset=["RS Roll 60d"]) \
+        .map(color_rsi,     subset=["RSI"])
 
     st.dataframe(styled, use_container_width=True, height=600)
 
