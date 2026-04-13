@@ -209,9 +209,9 @@ with tab1:
         else:          return "background-color: #fff3cd"
 
     styled = df_display.style \
-        .applymap(color_pct,  subset=["1M %", "3M %", "6M %", "YTD %"]) \
-        .applymap(color_rs,   subset=["RS Norm", "RS Roll 60d"]) \
-        .applymap(color_rsi,  subset=["RSI"])
+        .map(color_pct,  subset=["1M %", "3M %", "6M %", "YTD %"]) \
+        .map(color_rs,   subset=["RS Norm", "RS Roll 60d"]) \
+        .map(color_rsi,  subset=["RSI"])
 
     st.dataframe(styled, use_container_width=True, height=600)
 
