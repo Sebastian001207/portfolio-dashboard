@@ -44,7 +44,7 @@ END_DATE = get_last_trading_day()
 # ── Rolling Windows ──────────────────────
 WIN_BETA   = 30
 WIN_CORR   = 60
-WIN_RS     = 20
+WIN_RS     = 30
 WIN_RSI    = 14
 
 # ══════════════════════════════════════════
@@ -289,10 +289,10 @@ with tab2:
     if ticker and ticker in indicators:
         df = indicators[ticker]
 
-        fig = plt.figure(figsize=(14, 24))
+        fig = plt.figure(figsize=(14, 28))
         fig.suptitle(f"{ticker} vs {BENCHMARK} — Full Indicator Dashboard",
                      fontsize=13, fontweight="bold")
-        gs = gridspec.GridSpec(6, 1, hspace=0.55)
+        gs = gridspec.GridSpec(7, 1, hspace=0.55)
 
         # Price
         ax0 = fig.add_subplot(gs[0])
@@ -324,41 +324,52 @@ with tab2:
         ax2.set_ylabel("RS Index (base=100)")
         ax2.grid(True, alpha=0.3)
 
-        # RSI
+        # Rolling 30-Day RS
         ax3 = fig.add_subplot(gs[3])
-        ax3.plot(df["Date"], df["RSI"], color="royalblue", linewidth=1.5)
-        ax3.axhline(70, color="red",   linestyle="--", linewidth=1, label="Overbought (70)")
-        ax3.axhline(50, color="gray",  linestyle=":",  linewidth=1)
-        ax3.axhline(30, color="green", linestyle="--", linewidth=1, label="Oversold (30)")
-        ax3.fill_between(df["Date"], df["RSI"], 70, where=(df["RSI"] >= 70), alpha=0.2, color="red")
-        ax3.fill_between(df["Date"], df["RSI"], 30, where=(df["RSI"] <= 30), alpha=0.2, color="green")
-        ax3.set_title("③ RSI (14)")
-        ax3.set_ylabel("RSI")
-        ax3.set_ylim(0, 100)
+        ax3.plot(df["Date"], df["RS_Rolling"], color="purple", linewidth=1.5)
+        ax3.axhline(1, color="gray", linestyle="--", linewidth=1, label="Equal 30-day return")
+        ax3.fill_between(df["Date"], df["RS_Rolling"], 1, where=(df["RS_Rolling"] > 1), alpha=0.15, color="green", label=f"{ticker} stronger (30d)")
+        ax3.fill_between(df["Date"], df["RS_Rolling"], 1, where=(df["RS_Rolling"] < 1), alpha=0.15, color="red", label=f"{BENCHMARK} stronger (30d)")
+        ax3.set_title("③ Rolling 30-Day RS — Start date neutral, shows recent momentum")
+        ax3.set_ylabel("Rolling RS Ratio")
         ax3.legend(fontsize=8)
         ax3.grid(True, alpha=0.3)
 
-        # Beta
+        # RSI
         ax4 = fig.add_subplot(gs[4])
-        ax4.plot(df["Date"], df["Beta"], color="darkorange", linewidth=1.5)
-        ax4.axhline(1, color="gray", linestyle="--", linewidth=1, label="Beta = 1")
-        ax4.fill_between(df["Date"], df["Beta"], 1, where=(df["Beta"] > 1), alpha=0.15, color="red")
-        ax4.fill_between(df["Date"], df["Beta"], 1, where=(df["Beta"] < 1), alpha=0.15, color="green")
-        ax4.set_title("④ Rolling 30-Day Beta")
-        ax4.set_ylabel("Beta")
+        ax4.plot(df["Date"], df["RSI"], color="royalblue", linewidth=1.5)
+        ax4.axhline(70, color="red",   linestyle="--", linewidth=1, label="Overbought (70)")
+        ax4.axhline(50, color="gray",  linestyle=":",  linewidth=1)
+        ax4.axhline(30, color="green", linestyle="--", linewidth=1, label="Oversold (30)")
+        ax4.fill_between(df["Date"], df["RSI"], 70, where=(df["RSI"] >= 70), alpha=0.2, color="red")
+        ax4.fill_between(df["Date"], df["RSI"], 30, where=(df["RSI"] <= 30), alpha=0.2, color="green")
+        ax4.set_title("③ RSI (14)")
+        ax4.set_ylabel("RSI")
+        ax4.set_ylim(0, 100)
         ax4.legend(fontsize=8)
         ax4.grid(True, alpha=0.3)
 
-        # Correlation
+        # Beta
         ax5 = fig.add_subplot(gs[5])
-        ax5.plot(df["Date"], df["Corr"], color="steelblue", linewidth=1.5)
-        ax5.axhline(0.8, color="gray", linestyle=":", linewidth=0.8, label="0.8 threshold")
-        ax5.fill_between(df["Date"], df["Corr"], 0.8, where=(df["Corr"] < 0.8), alpha=0.2, color="orange")
-        ax5.set_title("⑤ Rolling 30-Day Correlation")
-        ax5.set_ylabel("Correlation")
-        ax5.set_ylim(0, 1.1)
+        ax5.plot(df["Date"], df["Beta"], color="darkorange", linewidth=1.5)
+        ax5.axhline(1, color="gray", linestyle="--", linewidth=1, label="Beta = 1")
+        ax5.fill_between(df["Date"], df["Beta"], 1, where=(df["Beta"] > 1), alpha=0.15, color="red")
+        ax5.fill_between(df["Date"], df["Beta"], 1, where=(df["Beta"] < 1), alpha=0.15, color="green")
+        ax5.set_title("④ Rolling 30-Day Beta")
+        ax5.set_ylabel("Beta")
         ax5.legend(fontsize=8)
         ax5.grid(True, alpha=0.3)
+
+        # Correlation
+        ax6 = fig.add_subplot(gs[6])
+        ax6.plot(df["Date"], df["Corr"], color="steelblue", linewidth=1.5)
+        ax6.axhline(0.8, color="gray", linestyle=":", linewidth=0.8, label="0.8 threshold")
+        ax6.fill_between(df["Date"], df["Corr"], 0.8, where=(df["Corr"] < 0.8), alpha=0.2, color="orange")
+        ax6.set_title("⑤ Rolling 30-Day Correlation")
+        ax6.set_ylabel("Correlation")
+        ax6.set_ylim(0, 1.1)
+        ax6.legend(fontsize=8)
+        ax6.grid(True, alpha=0.3)
 
         plt.tight_layout()
         st.pyplot(fig)
