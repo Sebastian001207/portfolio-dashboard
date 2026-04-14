@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
 from datetime import date, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ══════════════════════════════════════════
 #  PAGE CONFIG
@@ -40,30 +41,86 @@ def get_last_trading_day():
 
 END_DATE = get_last_trading_day()
 
+# ── Rolling Windows ──────────────────────
+WIN_BETA   = 30
+WIN_CORR   = 60
+WIN_RS     = 20
+WIN_RSI    = 14
+
 # ══════════════════════════════════════════
-#  DATA FETCHING (cached)
+#  DATA FETCHING — Batch + Threaded
 # ══════════════════════════════════════════
+
 @st.cache_data(show_spinner=False, ttl=3600)
-def fetch_ticker(ticker, start, end):
-    import time
-    for attempt in range(5):
-        try:
-            time.sleep(1 + attempt)
-            raw = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
-            if raw.empty:
-                return None
-            raw.columns = [col[0] for col in raw.columns]
-            df = raw[["Close"]].reset_index()
-            df.columns = ["Date", "Close"]
-            df["% Change"] = df["Close"].pct_change()
-            df["Date"] = pd.to_datetime(df["Date"])
-            return df.dropna().reset_index(drop=True)
-        except Exception as e:
-            if "Too Many Requests" in str(e) or "Rate" in str(e):
-                time.sleep(10 * (attempt + 1))
+def fetch_all_tickers(tickers, start, end):
+    """
+    Download all tickers in one batch call using yf.download.
+    Falls back to threaded individual fetches for any that fail.
+    """
+    all_tickers = list(set(tickers + [BENCHMARK]))
+
+    try:
+        raw = yf.download(
+            all_tickers,
+            start=start,
+            end=end,
+            auto_adjust=True,
+            progress=False,
+            threads=True,       # yfinance built-in threading
+            group_by="ticker",
+        )
+    except Exception as e:
+        st.warning(f"Batch download failed ({e}), falling back to individual fetches.")
+        raw = None
+
+    result = {}
+
+    if raw is not None and not raw.empty:
+        for ticker in all_tickers:
+            try:
+                if ticker in raw.columns.get_level_values(0):
+                    df = raw[ticker][["Close"]].copy().reset_index()
+                else:
+                    continue
+                df.columns = ["Date", "Close"]
+                df = df.dropna(subset=["Close"])
+                df["Date"] = pd.to_datetime(df["Date"])
+                df["% Change"] = df["Close"].pct_change()
+                df = df.dropna().reset_index(drop=True)
+                if len(df) > 5:
+                    result[ticker] = df
+            except Exception:
                 continue
-            return None
-    return None
+
+    # Fallback: fetch any missing tickers individually (threaded)
+    missing = [t for t in all_tickers if t not in result]
+    if missing:
+        def fetch_one(ticker):
+            try:
+                raw_one = yf.download(ticker, start=start, end=end,
+                                      auto_adjust=True, progress=False)
+                if raw_one.empty:
+                    return ticker, None
+                raw_one.columns = [col[0] if isinstance(col, tuple) else col
+                                   for col in raw_one.columns]
+                df = raw_one[["Close"]].reset_index()
+                df.columns = ["Date", "Close"]
+                df["Date"] = pd.to_datetime(df["Date"])
+                df["% Change"] = df["Close"].pct_change()
+                df = df.dropna().reset_index(drop=True)
+                return ticker, df if len(df) > 5 else None
+            except Exception:
+                return ticker, None
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(fetch_one, t): t for t in missing}
+            for future in as_completed(futures):
+                ticker, df = future.result()
+                if df is not None:
+                    result[ticker] = df
+
+    return result
+
 
 def compute_indicators(portfolio_data, bench_df):
     results = {}
@@ -75,7 +132,7 @@ def compute_indicators(portfolio_data, bench_df):
                 on="Date", suffixes=("_bench", "_stock")
             ).dropna().reset_index(drop=True)
 
-            if len(merged) < 30:
+            if len(merged) < 10:
                 continue
 
             merged["Cum_bench"] = (1 + merged["% Change_bench"]).cumprod()
@@ -83,45 +140,51 @@ def compute_indicators(portfolio_data, bench_df):
             merged["RS_Line"]   = merged["Cum_stock"] / merged["Cum_bench"]
             merged["RS_Norm"]   = (merged["RS_Line"] / merged["RS_Line"].iloc[0]) * 100
 
+            win_beta = min(WIN_BETA, len(merged) // 2)
+            win_corr = min(WIN_CORR, len(merged) // 2)
+            win_rs   = min(WIN_RS,   len(merged) // 2)
+            win_rsi  = min(WIN_RSI,  len(merged) // 2)
+            # RS Rolling
             merged["RS_Rolling"] = (
-                merged["% Change_stock"].rolling(30).apply(lambda x: (1+x).prod(), raw=True) /
-                merged["% Change_bench"].rolling(30).apply(lambda x: (1+x).prod(), raw=True)
+                merged["% Change_stock"].rolling(win_rs).apply(lambda x: (1+x).prod(), raw=True) /
+                merged["% Change_bench"].rolling(win_rs).apply(lambda x: (1+x).prod(), raw=True)
             )
 
-            cov  = merged["% Change_stock"].rolling(30).cov(merged["% Change_bench"])
-            var  = merged["% Change_bench"].rolling(30).var()
+            # Beta
+            cov = merged["% Change_stock"].rolling(win_beta).cov(merged["% Change_bench"])
+            var = merged["% Change_bench"].rolling(win_beta).var()
             merged["Beta"] = cov / var
-            merged["Corr"] = merged["% Change_stock"].rolling(30).corr(merged["% Change_bench"])
 
+            # Correlation
+            merged["Corr"] = merged["% Change_stock"].rolling(win_corr).corr(merged["% Change_bench"])
+
+            # RSI
             delta    = merged["Close_stock"].diff()
             gain     = delta.clip(lower=0)
             loss     = -delta.clip(upper=0)
-            avg_gain = gain.rolling(14).mean()
-            avg_loss = loss.rolling(14).mean()
+            avg_gain = gain.rolling(win_rsi).mean()
+            avg_loss = loss.rolling(win_rsi).mean()
             rs       = avg_gain / avg_loss
             merged["RSI"] = 100 - (100 / (1 + rs))
 
             results[ticker] = merged
         except Exception as e:
-            st.warning(f"Skipping {ticker}: {e}")
             continue
     return results
 
 # ══════════════════════════════════════════
 #  LOAD DATA
 # ══════════════════════════════════════════
-with st.spinner("📡 Fetching market data... (this may take a minute on first load)"):
-    bench = fetch_ticker(BENCHMARK, START_DATE, END_DATE)
+with st.spinner("📡 Fetching market data…"):
+    all_data = fetch_all_tickers(TICKERS, START_DATE, END_DATE)
 
+    bench = all_data.get(BENCHMARK)
     if bench is None or bench.empty:
         st.error("❌ Failed to fetch benchmark (SPY). Please refresh the page.")
         st.stop()
 
-    portfolio_data = {}
-    for ticker in TICKERS:
-        df = fetch_ticker(ticker, START_DATE, END_DATE)
-        if df is not None and len(df) > 30:
-            portfolio_data[ticker] = df
+    portfolio_data = {t: df for t, df in all_data.items()
+                      if t != BENCHMARK and len(df) > 10}
 
     indicators = compute_indicators(portfolio_data, bench)
 
@@ -186,8 +249,7 @@ with tab1:
     df_display = df_display.sort_values(sort_col, ascending=False).reset_index(drop=True)
 
     def color_pct(val):
-        if pd.isna(val):
-            return ""
+        if pd.isna(val): return ""
         intensity = min(abs(val) / 30, 1)
         if val > 0:
             g = int(200 + intensity * 55)
@@ -197,18 +259,15 @@ with tab1:
             return f"background-color: rgb({r}, 200, 200); color: black"
 
     def color_rs(val):
-        if pd.isna(val):
-            return ""
+        if pd.isna(val): return ""
         return "background-color: #d4edda" if val > 100 else "background-color: #f8d7da"
 
     def color_rs_roll(val):
-        if pd.isna(val):
-            return ""
+        if pd.isna(val): return ""
         return "background-color: #d4edda" if val > 1 else "background-color: #f8d7da"
 
     def color_rsi(val):
-        if pd.isna(val):
-            return ""
+        if pd.isna(val): return ""
         if val > 70:   return "background-color: #f8d7da"
         elif val < 30: return "background-color: #d4edda"
         else:          return "background-color: #fff3cd"
